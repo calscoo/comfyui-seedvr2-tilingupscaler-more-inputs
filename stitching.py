@@ -118,21 +118,52 @@ def _batch_upscale_tiles(
 
 
 def _prepare_tile_for_stitching(tile_info: Dict, ai_upscaled_tile: Image.Image, upscale_factor: float) -> Dict:
-    """Prepare an upscaled tile for stitching by resizing, positioning, and cropping."""
-    # Resize to final target size
-    target_tile_width = int(tile_info["tile"].width * upscale_factor)
-    target_tile_height = int(tile_info["tile"].height * upscale_factor)
-    resized_tile = ai_upscaled_tile.resize((target_tile_width, target_tile_height), Image.LANCZOS)
+    """Prepare an upscaled tile for stitching by resizing, positioning, and cropping.
 
+    This function handles both regular overlap padding (for blending adjacent tiles)
+    and memory padding (added for GPU efficiency). Memory padding must be completely
+    removed as it contains reflected/extended content that shouldn't be in the output.
+    """
+    # Get the original tile size (before memory padding was added)
+    original_width, original_height = tile_info["original_tile_size"]
+
+    # The AI upscaled the full tile (including memory padding)
+    # We need to first crop out the memory padding, then handle overlap padding
+
+    # Get memory padding info
+    mem_left_pad, mem_top_pad, mem_right_pad, mem_bottom_pad = tile_info.get("memory_padding", (0, 0, 0, 0))
+
+    # Calculate the upscaled dimensions
+    # The upscaled tile corresponds to the full padded tile (with memory padding)
+    full_tile_width = tile_info["tile"].width
+    full_tile_height = tile_info["tile"].height
+
+    # Resize the upscaled tile to match the expected output size for the full tile
+    target_full_width = int(full_tile_width * upscale_factor)
+    target_full_height = int(full_tile_height * upscale_factor)
+    resized_tile = ai_upscaled_tile.resize((target_full_width, target_full_height), Image.LANCZOS)
+
+    # First, crop out the memory padding (scale the memory padding amounts)
+    scaled_mem_right = int(mem_right_pad * upscale_factor)
+    scaled_mem_bottom = int(mem_bottom_pad * upscale_factor)
+
+    # The original content (without memory padding) is in the top-left portion
+    original_content_width = int(original_width * upscale_factor)
+    original_content_height = int(original_height * upscale_factor)
+
+    # Crop to remove memory padding - keep only the original content area
+    if scaled_mem_right > 0 or scaled_mem_bottom > 0:
+        resized_tile = resized_tile.crop((0, 0, original_content_width, original_content_height))
+
+    # Now handle the regular overlap padding for blending
     # Calculate positioning
     paste_x = int(tile_info["position"][0] * upscale_factor)
     paste_y = int(tile_info["position"][1] * upscale_factor)
     final_tile_width = int(tile_info["actual_size"][0] * upscale_factor)
     final_tile_height = int(tile_info["actual_size"][1] * upscale_factor)
 
-    # Calculate scaled padding (both regular and memory padding)
+    # Calculate scaled overlap padding
     left_pad, top_pad, right_pad, bottom_pad = tile_info["padding"]
-    mem_left_pad, mem_top_pad, mem_right_pad, mem_bottom_pad = tile_info.get("memory_padding", (0, 0, 0, 0))
 
     scaled_left_pad = int(left_pad * upscale_factor)
     scaled_top_pad = int(top_pad * upscale_factor)
@@ -145,12 +176,12 @@ def _prepare_tile_for_stitching(tile_info: Dict, ai_upscaled_tile: Image.Image, 
     keep_right = scaled_right_pad // 2 if right_pad > 0 else 0
     keep_bottom = scaled_bottom_pad // 2 if bottom_pad > 0 else 0
 
-    # Crop the upscaled tile - keep partial padding on all sides
+    # Crop the tile - keep partial overlap padding on all sides for blending
     crop_box = (
         scaled_left_pad - keep_left,
         scaled_top_pad - keep_top,
-        scaled_left_pad + final_tile_width + keep_right,
-        scaled_top_pad + final_tile_height + keep_bottom
+        min(scaled_left_pad + final_tile_width + keep_right, resized_tile.width),
+        min(scaled_top_pad + final_tile_height + keep_bottom, resized_tile.height)
     )
     cropped_tile = resized_tile.crop(crop_box)
 
