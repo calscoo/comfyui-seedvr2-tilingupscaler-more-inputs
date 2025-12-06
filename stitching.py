@@ -6,17 +6,20 @@ from PIL import Image
 from scipy import ndimage
 from scipy.signal import convolve2d
 from collections import defaultdict
+from typing import Any, Dict, List, Optional
+
 try:
     import cv2
     HAS_OPENCV = True
 except ImportError:
     HAS_OPENCV = False
     print("Warning: OpenCV not available. Bilateral filtering will use Gaussian approximation.")
+
 from .image_utils import tensor_to_pil, pil_to_tensor
-from .seedvr2_adapter import build_execute_kwargs
+from .seedvr2_adapter import execute_seedvr2
 
 
-def _get_optimal_batch_size(num_tiles):
+def _get_optimal_batch_size(num_tiles: int) -> int:
     """Calculate optimal batch size following 4n+1 pattern (1, 5, 9, 13, 17, 21...)"""
     if num_tiles <= 1:
         return 1
@@ -25,33 +28,40 @@ def _get_optimal_batch_size(num_tiles):
     return 4 * n + 1
 
 
-def _create_base_image(seedvr2_instance, width, height, model, seed, tile_upscale_resolution,
-                       preserve_vram, block_swap_config, extra_args, base_image=None):
-    """Create or return base image for stitching."""
-    if base_image is not None:
-        return base_image
+def _create_base_image(
+    original_image: Image.Image,
+    width: int,
+    height: int,
+    dit_config: Dict[str, Any],
+    vae_config: Dict[str, Any],
+    seed: int,
+    tile_upscale_resolution: int,
+    color_correction: str = "lab",
+) -> Image.Image:
+    """Create base image for stitching by upscaling the original at low resolution."""
+    base_tensor = pil_to_tensor(original_image)
+    base_upscaled = execute_seedvr2(
+        images=base_tensor,
+        dit_config=dit_config,
+        vae_config=vae_config,
+        seed=seed,
+        resolution=min(512, tile_upscale_resolution // 2),
+        batch_size=1,
+        color_correction=color_correction,
+    )
+    base_pil = tensor_to_pil(base_upscaled)
+    return base_pil.resize((width, height), Image.LANCZOS)
 
-    if hasattr(seedvr2_instance, '_original_image'):
-        base_tensor = pil_to_tensor(seedvr2_instance._original_image)
-        base_upscaled_tuple = _execute_seedvr2(
-            seedvr2_instance,
-            images=base_tensor,
-            model=model,
-            seed=seed,
-            new_resolution=min(512, tile_upscale_resolution // 2),
-            batch_size=1,
-            preserve_vram=preserve_vram,
-            block_swap_config=block_swap_config,
-            extra_args=extra_args,
-        )
-        base_upscaled = tensor_to_pil(base_upscaled_tuple[0])
-        return base_upscaled.resize((width, height), Image.LANCZOS)
-    else:
-        return Image.new('RGB', (width, height), (128, 128, 128))
 
-
-def _batch_upscale_tiles(tiles, seedvr2_instance, model, seed, tile_upscale_resolution,
-                         preserve_vram, block_swap_config, extra_args, progress=None):
+def _batch_upscale_tiles(
+    tiles: List[Dict],
+    dit_config: Dict[str, Any],
+    vae_config: Dict[str, Any],
+    seed: int,
+    tile_upscale_resolution: int,
+    progress=None,
+    color_correction: str = "lab",
+) -> List[Image.Image]:
     """Batch process tiles by grouping them by size for optimal performance."""
     # Group tiles by their dimensions
     tiles_by_size = defaultdict(list)
@@ -60,7 +70,7 @@ def _batch_upscale_tiles(tiles, seedvr2_instance, model, seed, tile_upscale_reso
         tiles_by_size[tile_size].append((idx, tile_info))
 
     # Process each size group with optimal batch sizes
-    upscaled_tiles = [None] * len(tiles)  # Store results in original order
+    upscaled_tiles = [None] * len(tiles)
     tiles_processed_count = 0
 
     for tile_size, tile_group in tiles_by_size.items():
@@ -84,18 +94,15 @@ def _batch_upscale_tiles(tiles, seedvr2_instance, model, seed, tile_upscale_reso
                 progress.update_sub_progress(f"AI Upscaling ({tiles_processed_count + 1}/{len(tiles)})", 1)
 
             # Process this sub-batch
-            upscaled_batch_tuple = _execute_seedvr2(
-                seedvr2_instance,
+            upscaled_batch = execute_seedvr2(
                 images=batch_tensor,
-                model=model,
+                dit_config=dit_config,
+                vae_config=vae_config,
                 seed=seed,
-                new_resolution=tile_upscale_resolution,
+                resolution=tile_upscale_resolution,
                 batch_size=batch_size,
-                preserve_vram=preserve_vram,
-                block_swap_config=block_swap_config,
-                extra_args=extra_args,
+                color_correction=color_correction,
             )
-            upscaled_batch = upscaled_batch_tuple[0]
 
             # Store results back in original order
             for batch_idx, (original_idx, _) in enumerate(sub_batch):
@@ -110,7 +117,7 @@ def _batch_upscale_tiles(tiles, seedvr2_instance, model, seed, tile_upscale_reso
     return upscaled_tiles
 
 
-def _prepare_tile_for_stitching(tile_info, ai_upscaled_tile, upscale_factor):
+def _prepare_tile_for_stitching(tile_info: Dict, ai_upscaled_tile: Image.Image, upscale_factor: float) -> Dict:
     """Prepare an upscaled tile for stitching by resizing, positioning, and cropping."""
     # Resize to final target size
     target_tile_width = int(tile_info["tile"].width * upscale_factor)
@@ -131,8 +138,6 @@ def _prepare_tile_for_stitching(tile_info, ai_upscaled_tile, upscale_factor):
     scaled_top_pad = int(top_pad * upscale_factor)
     scaled_right_pad = int(right_pad * upscale_factor)
     scaled_bottom_pad = int(bottom_pad * upscale_factor)
-    scaled_mem_right_pad = int(mem_right_pad * upscale_factor)
-    scaled_mem_bottom_pad = int(mem_bottom_pad * upscale_factor)
 
     # Keep half the padding on ALL sides to create overlap for blending
     keep_left = scaled_left_pad // 2 if left_pad > 0 else 0
@@ -161,7 +166,7 @@ def _prepare_tile_for_stitching(tile_info, ai_upscaled_tile, upscale_factor):
     }
 
 
-def _build_laplacian_pyramid(image, levels=4):
+def _build_laplacian_pyramid(image: np.ndarray, levels: int = 4) -> List[np.ndarray]:
     """Build a Laplacian pyramid for multi-band blending.
 
     Args:
@@ -197,7 +202,7 @@ def _build_laplacian_pyramid(image, levels=4):
     return laplacian_pyramid
 
 
-def _collapse_laplacian_pyramid(laplacian_pyramid):
+def _collapse_laplacian_pyramid(laplacian_pyramid: List[np.ndarray]) -> np.ndarray:
     """Collapse a Laplacian pyramid back to an image.
 
     Args:
@@ -223,7 +228,7 @@ def _collapse_laplacian_pyramid(laplacian_pyramid):
     return image
 
 
-def _apply_bilateral_filter(image, d=9, sigma_color=75, sigma_space=75):
+def _apply_bilateral_filter(image, d: int = 9, sigma_color: float = 75, sigma_space: float = 75) -> np.ndarray:
     """Apply bilateral filtering for edge-preserving smoothing.
 
     Args:
@@ -245,7 +250,6 @@ def _apply_bilateral_filter(image, d=9, sigma_color=75, sigma_space=75):
         filtered = cv2.bilateralFilter(img_array, d, sigma_color, sigma_space)
     else:
         # Fallback: Use Gaussian approximation
-        # This is not true bilateral filtering but provides some edge preservation
         filtered = img_array.astype(np.float64)
 
         # Apply edge-aware smoothing using gradients
@@ -271,7 +275,7 @@ def _apply_bilateral_filter(image, d=9, sigma_color=75, sigma_space=75):
     return filtered
 
 
-def _compute_structure_tensor(image, sigma=1.5):
+def _compute_structure_tensor(image: np.ndarray, sigma: float = 1.5):
     """Compute structure tensor for content-aware blending.
 
     Args:
@@ -298,7 +302,6 @@ def _compute_structure_tensor(image, sigma=1.5):
     Ixy = ndimage.gaussian_filter(Ix * Iy, sigma)
 
     # Compute eigenvalues for edge strength and coherence
-    # Trace and determinant
     trace = Ixx + Iyy
     det = Ixx * Iyy - Ixy * Ixy
 
@@ -323,11 +326,42 @@ def _compute_structure_tensor(image, sigma=1.5):
     return edge_strength, coherence
 
 
-def process_and_stitch(tiles, width, height, seedvr2_instance, model, seed, tile_upscale_resolution, preserve_vram, block_swap_config, upscale_factor, mask_blur, progress, base_image=None, anti_aliasing_strength=0.0, extra_args=None, blending_method="auto"):
+def process_and_stitch(
+    tiles: List[Dict],
+    width: int,
+    height: int,
+    dit_config: Dict[str, Any],
+    vae_config: Dict[str, Any],
+    seed: int,
+    tile_upscale_resolution: int,
+    upscale_factor: float,
+    mask_blur: int,
+    progress,
+    original_image: Image.Image,
+    anti_aliasing_strength: float = 0.0,
+    blending_method: str = "auto",
+    color_correction: str = "lab",
+) -> Image.Image:
     """Main stitching function that chooses the appropriate method based on settings.
 
     Args:
-        blending_method: One of "auto", "multiband", "bilateral", "content_aware", "linear", "simple"
+        tiles: List of tile info dictionaries
+        width: Output image width
+        height: Output image height
+        dit_config: DiT model configuration
+        vae_config: VAE model configuration
+        seed: Random seed
+        tile_upscale_resolution: Resolution for upscaling tiles
+        upscale_factor: Scale factor for output
+        mask_blur: Blur radius for mask blending
+        progress: Progress tracker
+        original_image: Original input image
+        anti_aliasing_strength: Anti-aliasing strength (0-1)
+        blending_method: Blending method to use
+        color_correction: Color correction method for SeedVR2
+
+    Returns:
+        Stitched output image
     """
     # Auto mode: choose based on mask_blur value
     if blending_method == "auto":
@@ -340,90 +374,96 @@ def process_and_stitch(tiles, width, height, seedvr2_instance, model, seed, tile
 
     print(f"Using {blending_method} blending method...")
 
+    # Common kwargs for all blending methods
+    kwargs = {
+        "tiles": tiles,
+        "width": width,
+        "height": height,
+        "dit_config": dit_config,
+        "vae_config": vae_config,
+        "seed": seed,
+        "tile_upscale_resolution": tile_upscale_resolution,
+        "upscale_factor": upscale_factor,
+        "progress": progress,
+        "original_image": original_image,
+        "color_correction": color_correction,
+    }
+
     # Route to appropriate blending function
     if blending_method == "multiband":
-        result = process_and_stitch_multiband(tiles, width, height, seedvr2_instance, model, seed,
-                                             tile_upscale_resolution, preserve_vram, block_swap_config,
-                                             upscale_factor, progress, base_image, extra_args=extra_args)
+        result = _process_and_stitch_multiband(**kwargs)
     elif blending_method == "bilateral":
-        result = process_and_stitch_bilateral(tiles, width, height, seedvr2_instance, model, seed,
-                                             tile_upscale_resolution, preserve_vram, block_swap_config,
-                                             upscale_factor, mask_blur, progress, base_image, extra_args=extra_args)
+        result = _process_and_stitch_bilateral(**kwargs, mask_blur=mask_blur)
     elif blending_method == "content_aware":
-        result = process_and_stitch_content_aware(tiles, width, height, seedvr2_instance, model, seed,
-                                                 tile_upscale_resolution, preserve_vram, block_swap_config,
-                                                 upscale_factor, mask_blur, progress, base_image, extra_args=extra_args)
+        result = _process_and_stitch_content_aware(**kwargs, mask_blur=mask_blur)
     elif blending_method == "simple":
-        result = process_and_stitch_zero_blur(tiles, width, height, seedvr2_instance, model, seed,
-                                             tile_upscale_resolution, preserve_vram, block_swap_config,
-                                             upscale_factor, progress, base_image, extra_args=extra_args)
+        result = _process_and_stitch_zero_blur(**kwargs)
     else:  # "linear" or default
-        result = process_and_stitch_blended(tiles, width, height, seedvr2_instance, model, seed,
-                                           tile_upscale_resolution, preserve_vram, block_swap_config,
-                                           upscale_factor, mask_blur, progress, base_image, extra_args=extra_args)
+        result = _process_and_stitch_blended(**kwargs, mask_blur=mask_blur)
 
     # Apply anti-aliasing if requested
     if anti_aliasing_strength > 0:
-        result = apply_edge_aware_antialiasing(result, anti_aliasing_strength)
+        result = _apply_edge_aware_antialiasing(result, anti_aliasing_strength)
 
     return result
 
 
-def apply_edge_aware_antialiasing(image, strength):
+def _apply_edge_aware_antialiasing(image: Image.Image, strength: float) -> Image.Image:
     """Apply edge-aware anti-aliasing using Sobel edge detection."""
-    # Convert PIL image to numpy array
     img_array = np.array(image, dtype=np.float64)
-    
-    # Process each color channel
     smoothed = np.zeros_like(img_array)
-    
+
     for channel in range(3):
-        # Extract channel
         channel_data = img_array[:, :, channel]
-        
+
         # Apply Sobel filters to detect edges
         sobel_x = ndimage.sobel(channel_data, axis=1)
         sobel_y = ndimage.sobel(channel_data, axis=0)
-        
+
         # Calculate edge magnitude
         edge_magnitude = np.sqrt(sobel_x**2 + sobel_y**2)
-        
+
         # Normalize edge magnitude to 0-1
         if edge_magnitude.max() > 0:
             edge_magnitude = edge_magnitude / edge_magnitude.max()
-        
-        # Create inverse edge map (1 where no edges, 0 where strong edges)
-        # This ensures we smooth non-edge areas while preserving edges
+
+        # Create inverse edge map
         smoothing_mask = 1.0 - edge_magnitude
-        
-        # Apply adjustable strength
         smoothing_mask = 1.0 - (smoothing_mask * strength)
-        
+
         # Apply Gaussian smoothing
-        # Sigma scales with strength for adaptive smoothing
-        sigma = 0.5 + (strength * 1.5)  # Range from 0.5 to 2.0
+        sigma = 0.5 + (strength * 1.5)
         smoothed_channel = ndimage.gaussian_filter(channel_data, sigma=sigma)
-        
-        # Selective blend: original in edge areas, smoothed in non-edge areas
+
+        # Selective blend
         smoothed[:, :, channel] = channel_data * smoothing_mask + smoothed_channel * (1.0 - smoothing_mask)
-    
-    # Convert back to uint8 and PIL Image
+
     smoothed = np.clip(smoothed, 0, 255).astype(np.uint8)
     return Image.fromarray(smoothed)
 
 
-def process_and_stitch_multiband(tiles, width, height, seedvr2_instance, model, seed, tile_upscale_resolution, preserve_vram, block_swap_config, upscale_factor, progress, base_image=None, extra_args=None):
+def _process_and_stitch_multiband(
+    tiles: List[Dict],
+    width: int,
+    height: int,
+    dit_config: Dict[str, Any],
+    vae_config: Dict[str, Any],
+    seed: int,
+    tile_upscale_resolution: int,
+    upscale_factor: float,
+    progress,
+    original_image: Image.Image,
+    color_correction: str = "lab",
+) -> Image.Image:
     """Multi-band blending using Laplacian pyramids for frequency-separated stitching."""
     # Create base image
     base_image = _create_base_image(
-        seedvr2_instance, width, height, model, seed, tile_upscale_resolution,
-        preserve_vram, block_swap_config, extra_args, base_image
+        original_image, width, height, dit_config, vae_config, seed, tile_upscale_resolution, color_correction
     )
 
     # Batch process and upscale tiles
     upscaled_tiles = _batch_upscale_tiles(
-        tiles, seedvr2_instance, model, seed, tile_upscale_resolution,
-        preserve_vram, block_swap_config, extra_args, progress
+        tiles, dit_config, vae_config, seed, tile_upscale_resolution, progress, color_correction
     )
 
     # Build Laplacian pyramid for base image
@@ -484,26 +524,18 @@ def process_and_stitch_multiband(tiles, width, height, seedvr2_instance, model, 
         # Blend each level of the pyramid
         blended_pyramid = []
         for level in range(len(tile_pyramid)):
-            # Get mask for this level (already downsampled in mask_pyramid)
             mask_level = mask_pyramid[level]
-
-            # Ensure mask matches pyramid level dimensions exactly
             level_height, level_width = output_pyramid[level].shape[:2]
             if mask_level.shape[0] != level_height or mask_level.shape[1] != level_width:
-                # Resample if needed
                 mask_level = ndimage.zoom(mask_level,
                                          (level_height / mask_level.shape[0],
                                           level_width / mask_level.shape[1]), order=1)
 
-            # Add channel dimension
             mask_level = mask_level[:, :, np.newaxis]
-
-            # Blend: output * (1 - mask) + tile * mask
             blended = output_pyramid[level] * (1 - mask_level) + tile_pyramid[level] * mask_level
             blended_pyramid.append(blended)
 
         output_pyramid = blended_pyramid
-
         progress.update()
 
     # Collapse pyramid to final image
@@ -512,12 +544,24 @@ def process_and_stitch_multiband(tiles, width, height, seedvr2_instance, model, 
     return Image.fromarray(output_array)
 
 
-def process_and_stitch_bilateral(tiles, width, height, seedvr2_instance, model, seed, tile_upscale_resolution, preserve_vram, block_swap_config, upscale_factor, mask_blur, progress, base_image=None, extra_args=None):
+def _process_and_stitch_bilateral(
+    tiles: List[Dict],
+    width: int,
+    height: int,
+    dit_config: Dict[str, Any],
+    vae_config: Dict[str, Any],
+    seed: int,
+    tile_upscale_resolution: int,
+    upscale_factor: float,
+    mask_blur: int,
+    progress,
+    original_image: Image.Image,
+    color_correction: str = "lab",
+) -> Image.Image:
     """Bilateral filtering-based stitching for edge-preserving blending."""
     # Create base image
     base_image = _create_base_image(
-        seedvr2_instance, width, height, model, seed, tile_upscale_resolution,
-        preserve_vram, block_swap_config, extra_args, base_image
+        original_image, width, height, dit_config, vae_config, seed, tile_upscale_resolution, color_correction
     )
 
     output_image = base_image.copy()
@@ -526,8 +570,7 @@ def process_and_stitch_bilateral(tiles, width, height, seedvr2_instance, model, 
 
     # Batch process and upscale tiles
     upscaled_tiles = _batch_upscale_tiles(
-        tiles, seedvr2_instance, model, seed, tile_upscale_resolution,
-        preserve_vram, block_swap_config, extra_args, progress
+        tiles, dit_config, vae_config, seed, tile_upscale_resolution, progress, color_correction
     )
 
     # Process each tile
@@ -542,7 +585,7 @@ def process_and_stitch_bilateral(tiles, width, height, seedvr2_instance, model, 
 
         progress.update_sub_progress("Bilateral Filtering", 3)
 
-        # Apply bilateral filter to tile for edge-preserving smoothing
+        # Apply bilateral filter to tile
         tile_array = _apply_bilateral_filter(cropped_tile, d=9, sigma_color=75, sigma_space=75)
         tile_array = tile_array.astype(np.float64)
 
@@ -556,12 +599,11 @@ def process_and_stitch_bilateral(tiles, width, height, seedvr2_instance, model, 
                 tile_x = x - paste_x_adjusted
                 tile_y = y - paste_y_adjusted
 
-                if 0 <= y < height and 0 <= x < width and tile_y < tile_array.shape[0] and tile_x < tile_array.shape[1]:
-                    # Distance-based weight (favor center of tile)
+                if tile_y < tile_array.shape[0] and tile_x < tile_array.shape[1]:
                     dist_x = min(tile_x, tile_array.shape[1] - 1 - tile_x)
                     dist_y = min(tile_y, tile_array.shape[0] - 1 - tile_y)
                     tile_weight = min(dist_x, dist_y) / max(tile_array.shape[1], tile_array.shape[0])
-                    tile_weight = max(0.1, tile_weight)  # Minimum weight
+                    tile_weight = max(0.1, tile_weight)
 
                     current_weight = weight_array[y, x]
                     new_weight = current_weight + tile_weight
@@ -579,12 +621,24 @@ def process_and_stitch_bilateral(tiles, width, height, seedvr2_instance, model, 
     return Image.fromarray(output_array)
 
 
-def process_and_stitch_content_aware(tiles, width, height, seedvr2_instance, model, seed, tile_upscale_resolution, preserve_vram, block_swap_config, upscale_factor, mask_blur, progress, base_image=None, extra_args=None):
+def _process_and_stitch_content_aware(
+    tiles: List[Dict],
+    width: int,
+    height: int,
+    dit_config: Dict[str, Any],
+    vae_config: Dict[str, Any],
+    seed: int,
+    tile_upscale_resolution: int,
+    upscale_factor: float,
+    mask_blur: int,
+    progress,
+    original_image: Image.Image,
+    color_correction: str = "lab",
+) -> Image.Image:
     """Content-aware stitching using structure tensor for adaptive blending."""
     # Create base image
     base_image = _create_base_image(
-        seedvr2_instance, width, height, model, seed, tile_upscale_resolution,
-        preserve_vram, block_swap_config, extra_args, base_image
+        original_image, width, height, dit_config, vae_config, seed, tile_upscale_resolution, color_correction
     )
 
     output_array = np.array(base_image, dtype=np.float64)
@@ -595,8 +649,7 @@ def process_and_stitch_content_aware(tiles, width, height, seedvr2_instance, mod
 
     # Batch process and upscale tiles
     upscaled_tiles = _batch_upscale_tiles(
-        tiles, seedvr2_instance, model, seed, tile_upscale_resolution,
-        preserve_vram, block_swap_config, extra_args, progress
+        tiles, dit_config, vae_config, seed, tile_upscale_resolution, progress, color_correction
     )
 
     # Process each tile
@@ -612,37 +665,27 @@ def process_and_stitch_content_aware(tiles, width, height, seedvr2_instance, mod
         progress.update_sub_progress("Content-Aware Blending", 3)
 
         tile_array = np.array(cropped_tile, dtype=np.float64)
-
-        # Compute structure tensor for this tile
         tile_edge_strength, tile_coherence = _compute_structure_tensor(tile_array)
 
-        # Define region
         end_x = min(paste_x_adjusted + tile_array.shape[1], width)
         end_y = min(paste_y_adjusted + tile_array.shape[0], height)
 
-        # Adaptive blending based on local structure
         for y in range(paste_y_adjusted, end_y):
             for x in range(paste_x_adjusted, end_x):
                 tile_x = x - paste_x_adjusted
                 tile_y = y - paste_y_adjusted
 
-                if 0 <= y < height and 0 <= x < width and tile_y < tile_array.shape[0] and tile_x < tile_array.shape[1]:
-                    # Get local structure information
+                if tile_y < tile_array.shape[0] and tile_x < tile_array.shape[1]:
                     local_edge = base_edge_strength[y, x]
                     local_coherence = base_coherence[y, x]
                     tile_edge = tile_edge_strength[tile_y, tile_x]
 
-                    # Adaptive weight based on edge strength and coherence
-                    # Higher coherence = more structured = use edge-adaptive blending
-                    # Lower coherence = less structured = use smooth blending
                     base_weight = 1.0 - local_coherence * 0.5
                     tile_weight = 1.0 - local_coherence * 0.5
 
-                    # In edge regions, prefer the sharper tile
                     if tile_edge > local_edge:
                         tile_weight *= (1.0 + (tile_edge - local_edge))
 
-                    # Distance-based modulation
                     dist_x = min(tile_x, tile_array.shape[1] - 1 - tile_x)
                     dist_y = min(tile_y, tile_array.shape[0] - 1 - tile_y)
                     dist_weight = min(dist_x, dist_y) / max(tile_array.shape[1], tile_array.shape[0])
@@ -664,32 +707,38 @@ def process_and_stitch_content_aware(tiles, width, height, seedvr2_instance, mod
     return Image.fromarray(output_array)
 
 
-def process_and_stitch_zero_blur(tiles, width, height, seedvr2_instance, model, seed, tile_upscale_resolution, preserve_vram, block_swap_config, upscale_factor, progress, base_image=None, extra_args=None):
+def _process_and_stitch_zero_blur(
+    tiles: List[Dict],
+    width: int,
+    height: int,
+    dit_config: Dict[str, Any],
+    vae_config: Dict[str, Any],
+    seed: int,
+    tile_upscale_resolution: int,
+    upscale_factor: float,
+    progress,
+    original_image: Image.Image,
+    color_correction: str = "lab",
+) -> Image.Image:
     """Zero-blur stitching that preserves maximum detail through precise pixel averaging."""
     # Create base image
     base_image = _create_base_image(
-        seedvr2_instance, width, height, model, seed, tile_upscale_resolution,
-        preserve_vram, block_swap_config, extra_args, base_image
+        original_image, width, height, dit_config, vae_config, seed, tile_upscale_resolution, color_correction
     )
 
-    # Use numpy arrays for precise pixel control
     output_array = np.array(base_image, dtype=np.float64)
     weight_array = np.zeros((height, width), dtype=np.float64)
 
     # Batch process and upscale tiles
     upscaled_tiles = _batch_upscale_tiles(
-        tiles, seedvr2_instance, model, seed, tile_upscale_resolution,
-        preserve_vram, block_swap_config, extra_args, progress
+        tiles, dit_config, vae_config, seed, tile_upscale_resolution, progress, color_correction
     )
 
-    # Now process each upscaled tile for stitching
+    # Process each upscaled tile for stitching
     for tile_idx, tile_info in enumerate(tiles):
-        # Get the pre-upscaled tile
         ai_upscaled_tile = upscaled_tiles[tile_idx]
 
         progress.update_sub_progress("Resizing & Positioning", 2)
-
-        # Prepare tile for stitching
         prepared = _prepare_tile_for_stitching(tile_info, ai_upscaled_tile, upscale_factor)
         cropped_tile = prepared["cropped_tile"]
         paste_x_adjusted = prepared["paste_x"]
@@ -699,60 +748,63 @@ def process_and_stitch_zero_blur(tiles, width, height, seedvr2_instance, model, 
 
         progress.update_sub_progress("Seamless Blending", 3)
 
-        # Define the region in the output image
         end_x = min(paste_x_adjusted + tile_array.shape[1], width)
         end_y = min(paste_y_adjusted + tile_array.shape[0], height)
 
-        # Pixel-perfect weighted averaging for seamless blending
         for y in range(paste_y_adjusted, end_y):
             for x in range(paste_x_adjusted, end_x):
                 tile_x = x - paste_x_adjusted
                 tile_y = y - paste_y_adjusted
 
-                if 0 <= y < height and 0 <= x < width and tile_y < tile_array.shape[0] and tile_x < tile_array.shape[1]:
+                if tile_y < tile_array.shape[0] and tile_x < tile_array.shape[1]:
                     current_weight = weight_array[y, x]
                     new_weight = current_weight + 1.0
-                    
-                    # Weighted average - preserves all detail while eliminating seams
+
                     if current_weight > 0:
                         output_array[y, x] = (output_array[y, x] * current_weight + tile_array[tile_y, tile_x]) / new_weight
                     else:
                         output_array[y, x] = tile_array[tile_y, tile_x]
-                    
+
                     weight_array[y, x] = new_weight
-        
-        # Complete this tile
+
         progress.update()
-    
-    # Convert back to PIL Image
+
     output_array = np.clip(output_array, 0, 255).astype(np.uint8)
     return Image.fromarray(output_array)
 
 
-def process_and_stitch_blended(tiles, width, height, seedvr2_instance, model, seed, tile_upscale_resolution, preserve_vram, block_swap_config, upscale_factor, mask_blur, progress, base_image=None, extra_args=None):
+def _process_and_stitch_blended(
+    tiles: List[Dict],
+    width: int,
+    height: int,
+    dit_config: Dict[str, Any],
+    vae_config: Dict[str, Any],
+    seed: int,
+    tile_upscale_resolution: int,
+    upscale_factor: float,
+    mask_blur: int,
+    progress,
+    original_image: Image.Image,
+    color_correction: str = "lab",
+) -> Image.Image:
     """Standard blended stitching with user-controlled blur."""
     # Create base image
     base_image = _create_base_image(
-        seedvr2_instance, width, height, model, seed, tile_upscale_resolution,
-        preserve_vram, block_swap_config, extra_args, base_image
+        original_image, width, height, dit_config, vae_config, seed, tile_upscale_resolution, color_correction
     )
 
     output_image = base_image.copy()
 
     # Batch process and upscale tiles
     upscaled_tiles = _batch_upscale_tiles(
-        tiles, seedvr2_instance, model, seed, tile_upscale_resolution,
-        preserve_vram, block_swap_config, extra_args, progress
+        tiles, dit_config, vae_config, seed, tile_upscale_resolution, progress, color_correction
     )
 
-    # Now process each upscaled tile for stitching
+    # Process each upscaled tile for stitching
     for tile_idx, tile_info in enumerate(tiles):
-        # Get the pre-upscaled tile
         ai_upscaled_tile = upscaled_tiles[tile_idx]
 
         progress.update_sub_progress("Resizing & Positioning", 2)
-
-        # Prepare tile for stitching
         prepared = _prepare_tile_for_stitching(tile_info, ai_upscaled_tile, upscale_factor)
         cropped_tile = prepared["cropped_tile"]
         paste_x_adjusted = prepared["paste_x"]
@@ -761,10 +813,13 @@ def process_and_stitch_blended(tiles, width, height, seedvr2_instance, model, se
 
         progress.update_sub_progress("Mask Blending", 3)
 
-        # Create mask with user-specified blur - use actual tile size including kept overlap on all sides
+        # Create mask with user-specified blur
         actual_crop_width = cropped_tile.width
         actual_crop_height = cropped_tile.height
-        tile_mask = create_precise_tile_mask(actual_crop_width, actual_crop_height, mask_blur, tile_info["padding"], keep_left, keep_top, keep_right, keep_bottom)
+        tile_mask = _create_precise_tile_mask(
+            actual_crop_width, actual_crop_height, mask_blur,
+            tile_info["padding"], keep_left, keep_top, keep_right, keep_bottom
+        )
 
         # Create RGBA version of the tile for compositing
         tile_rgba = Image.new('RGBA', output_image.size, (0, 0, 0, 0))
@@ -774,31 +829,32 @@ def process_and_stitch_blended(tiles, width, height, seedvr2_instance, model, se
         full_mask = Image.new('L', output_image.size, 0)
         full_mask.paste(tile_mask, (paste_x_adjusted, paste_y_adjusted))
         tile_rgba.putalpha(full_mask)
-        
+
         # Alpha composite onto the output image
         output_rgba = output_image.convert('RGBA')
         output_rgba.alpha_composite(tile_rgba)
         output_image = output_rgba.convert('RGB')
-        
-        # Complete this tile
+
         progress.update()
 
     return output_image
 
 
-def create_precise_tile_mask(width, height, blur_radius, padding_info, keep_left=0, keep_top=0, keep_right=0, keep_bottom=0):
-    """Create smart blending mask with proper overlap handling on all sides.
-
-    The mask ensures seamless blending in overlap regions by fading across the FULL overlap width.
-    Since each tile keeps half the padding, the total overlap is keep_left + keep_right (which equals
-    the full padding). Each tile must fade across this entire overlap region for masks to sum to 255.
-    """
+def _create_precise_tile_mask(
+    width: int,
+    height: int,
+    blur_radius: int,
+    padding_info: tuple,
+    keep_left: int = 0,
+    keep_top: int = 0,
+    keep_right: int = 0,
+    keep_bottom: int = 0,
+) -> Image.Image:
+    """Create smart blending mask with proper overlap handling on all sides."""
     left_pad, top_pad, right_pad, bottom_pad = padding_info
     mask_array = np.full((height, width), 255, dtype=np.uint8)
 
     if blur_radius > 0:
-        # The overlap width is double the kept amount (keep_left on this tile + keep_right on neighbor)
-        # We fade across the full overlap width to ensure masks sum to 255
         overlap_width_left = keep_left * 2 if keep_left > 0 else 0
         overlap_width_top = keep_top * 2 if keep_top > 0 else 0
         overlap_width_right = keep_right * 2 if keep_right > 0 else 0
@@ -808,52 +864,24 @@ def create_precise_tile_mask(width, height, blur_radius, padding_info, keep_left
             for x in range(width):
                 min_alpha = 255
 
-                # LEFT EDGE: Fade from 0 to 255 across the FULL overlap width
-                # Overlap region is [0, overlap_width_left), fade across entire width
                 if left_pad > 0 and overlap_width_left > 0 and x < overlap_width_left:
-                    # Fade from 0 to 255 across the full overlap width
-                    # At x=0: fade_alpha = 0
-                    # At x=keep_left-1: fade_alpha ≈ 128 (halfway)
-                    # Note: we only have pixels up to keep_left in this tile
                     fade_alpha = int(255 * x / overlap_width_left)
                     min_alpha = min(min_alpha, fade_alpha)
 
-                # TOP EDGE: Same logic as left edge
                 if top_pad > 0 and overlap_width_top > 0 and y < overlap_width_top:
                     fade_alpha = int(255 * y / overlap_width_top)
                     min_alpha = min(min_alpha, fade_alpha)
 
-                # RIGHT EDGE: Fade from 255 to 0 across the FULL overlap width
-                # Overlap starts at (width - overlap_width_right), extends to width
                 if right_pad > 0 and overlap_width_right > 0 and x >= width - overlap_width_right:
-                    # Distance from start of overlap region
                     distance_from_overlap_start = x - (width - overlap_width_right)
-                    # Fade from 255 to 0 across the full overlap width
                     fade_alpha = int(255 * (1.0 - distance_from_overlap_start / overlap_width_right))
                     min_alpha = min(min_alpha, fade_alpha)
 
-                # BOTTOM EDGE: Same logic as right edge
                 if bottom_pad > 0 and overlap_width_bottom > 0 and y >= height - overlap_width_bottom:
                     distance_from_overlap_start = y - (height - overlap_width_bottom)
                     fade_alpha = int(255 * (1.0 - distance_from_overlap_start / overlap_width_bottom))
                     min_alpha = min(min_alpha, fade_alpha)
 
                 mask_array[y, x] = min_alpha
-    
+
     return Image.fromarray(mask_array)
-
-
-def _execute_seedvr2(seedvr2_instance, *, images, model, seed, new_resolution, batch_size, preserve_vram,
-                     block_swap_config, extra_args=None):
-    kwargs = build_execute_kwargs(
-        seedvr2_instance,
-        images=images,
-        model=model,
-        seed=seed,
-        new_resolution=new_resolution,
-        batch_size=batch_size,
-        preserve_vram=preserve_vram,
-        block_swap_config=block_swap_config,
-        extra_args=extra_args,
-    )
-    return seedvr2_instance.execute(**kwargs)
