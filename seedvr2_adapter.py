@@ -43,6 +43,8 @@ def execute_seedvr2(
     resolution: int,
     batch_size: int = 1,
     color_correction: str = "lab",
+    offload_device: str = "none",
+    enable_debug: bool = False,
 ) -> torch.Tensor:
     """Execute SeedVR2 upscaling on a batch of images.
 
@@ -54,6 +56,8 @@ def execute_seedvr2(
         resolution: Target resolution for the shortest edge
         batch_size: Number of frames to process together
         color_correction: Color correction method (lab, wavelet, wavelet_adaptive, hsv, adain, none)
+        offload_device: Device to offload intermediate tensors ('none', 'cpu', 'cuda:X')
+        enable_debug: Enable detailed debug logging
 
     Returns:
         Upscaled images tensor (N, H', W', C) in [0, 1] range
@@ -75,8 +79,8 @@ def execute_seedvr2(
         color_correction=color_correction,
         input_noise_scale=0.0,
         latent_noise_scale=0.0,
-        offload_device=dit_config.get("offload_device", "none"),
-        enable_debug=False,
+        offload_device=offload_device,
+        enable_debug=enable_debug,
     )
 
     # Extract tensor from io.NodeOutput

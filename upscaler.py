@@ -91,6 +91,21 @@ class SeedVR2TilingUpscaler:
                     "default": "lab",
                     "tooltip": "Color correction method to match upscaled output to original input colors. lab=perceptual matching (recommended), wavelet=frequency-based, wavelet_adaptive=with saturation correction, hsv=hue-conditional, adain=style transfer, none=disabled."
                 }),
+                "batch_size": ("INT", {
+                    "default": 5,
+                    "min": 1,
+                    "max": 81,
+                    "step": 4,
+                    "tooltip": "Number of tiles to process together per batch. Must follow 4n+1 pattern (1, 5, 9, 13, 17, 21, 25...). Higher values may improve quality but use more VRAM. Recommended: 5 for low VRAM, 9-13 for medium, 17+ for high VRAM."
+                }),
+                "offload_device": (["none", "cpu"], {
+                    "default": "none",
+                    "tooltip": "Device to offload intermediate tensors between processing phases. 'none'=keep on GPU (fastest, most VRAM), 'cpu'=offload to RAM (slower but saves VRAM for long processing runs)."
+                }),
+                "enable_debug": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Enable detailed debug logging with memory usage, timing information, and processing details. Useful for troubleshooting VRAM issues."
+                }),
             },
         }
 
@@ -100,7 +115,8 @@ class SeedVR2TilingUpscaler:
 
     def upscale(self, image, dit, vae, seed, new_resolution, tile_width, tile_height,
                 mask_blur, tile_padding, tile_upscale_resolution, tiling_strategy,
-                anti_aliasing_strength, blending_method="auto", color_correction="lab"):
+                anti_aliasing_strength, blending_method="auto", color_correction="lab",
+                batch_size=5, offload_device="none", enable_debug=False):
         try:
             # Initialize progress tracking
             progress = Progress(0)  # Will update with actual count later
@@ -131,7 +147,10 @@ class SeedVR2TilingUpscaler:
                 original_image=pil_image,
                 anti_aliasing_strength=anti_aliasing_strength,
                 blending_method=blending_method,
-                color_correction=color_correction
+                color_correction=color_correction,
+                batch_size=batch_size,
+                offload_device=offload_device,
+                enable_debug=enable_debug
             )
 
             # Finalize progress
@@ -147,9 +166,9 @@ class SeedVR2TilingUpscaler:
 
 
 NODE_CLASS_MAPPINGS = {
-    "SeedVR2TilingUpscaler": SeedVR2TilingUpscaler
+    "SeedVR2TilingUpscalerMoreInputs": SeedVR2TilingUpscaler
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "SeedVR2TilingUpscaler": "SeedVR2 Tiling Upscaler"
+    "SeedVR2TilingUpscalerMoreInputs": "SeedVR2 Tiling Upscaler (More Inputs)"
 }
