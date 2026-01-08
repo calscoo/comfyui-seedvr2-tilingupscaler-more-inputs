@@ -91,6 +91,20 @@ class SeedVR2TilingUpscaler:
                     "default": "lab",
                     "tooltip": "Color correction method to match upscaled output to original input colors. lab=perceptual matching (recommended), wavelet=frequency-based, wavelet_adaptive=with saturation correction, hsv=hue-conditional, adain=style transfer, none=disabled."
                 }),
+                "input_noise_scale": ("FLOAT", {
+                    "default": 0.0,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.01,
+                    "tooltip": "Input noise injection scale [0.0-1.0]. Adds controlled variation to each tile before encoding, helping preserve film grain and low-light details. Recommended: 0.05-0.15 for film grain preservation, 0.0 to disable."
+                }),
+                "latent_noise_scale": ("FLOAT", {
+                    "default": 0.0,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.01,
+                    "tooltip": "Latent space noise scale [0.0-1.0]. Adds variation during diffusion for more texture/detail generation. Use if input_noise_scale alone doesn't help. Recommended: 0.0-0.1, start low."
+                }),
                 "batch_size": ("INT", {
                     "default": 5,
                     "min": 1,
@@ -116,6 +130,7 @@ class SeedVR2TilingUpscaler:
     def upscale(self, image, dit, vae, seed, new_resolution, tile_width, tile_height,
                 mask_blur, tile_padding, tile_upscale_resolution, tiling_strategy,
                 anti_aliasing_strength, blending_method="auto", color_correction="lab",
+                input_noise_scale=0.0, latent_noise_scale=0.0,
                 batch_size=5, offload_device="none", enable_debug=False):
         try:
             # Initialize progress tracking
@@ -148,6 +163,8 @@ class SeedVR2TilingUpscaler:
                 anti_aliasing_strength=anti_aliasing_strength,
                 blending_method=blending_method,
                 color_correction=color_correction,
+                input_noise_scale=input_noise_scale,
+                latent_noise_scale=latent_noise_scale,
                 batch_size=batch_size,
                 offload_device=offload_device,
                 enable_debug=enable_debug

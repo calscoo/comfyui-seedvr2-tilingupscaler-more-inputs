@@ -43,6 +43,8 @@ def execute_seedvr2(
     resolution: int,
     batch_size: int = 1,
     color_correction: str = "lab",
+    input_noise_scale: float = 0.0,
+    latent_noise_scale: float = 0.0,
     offload_device: str = "none",
     enable_debug: bool = False,
 ) -> torch.Tensor:
@@ -56,6 +58,10 @@ def execute_seedvr2(
         resolution: Target resolution for the shortest edge
         batch_size: Number of frames to process together
         color_correction: Color correction method (lab, wavelet, wavelet_adaptive, hsv, adain, none)
+        input_noise_scale: Input noise injection scale [0.0-1.0]. Adds controlled variation 
+            before encoding. Helps preserve film grain and low-light details. Recommended: 0.05-0.15
+        latent_noise_scale: Latent space noise scale [0.0-1.0]. Adds variation during 
+            diffusion for more texture/detail generation. Recommended: 0.0-0.1
         offload_device: Device to offload intermediate tensors ('none', 'cpu', 'cuda:X')
         enable_debug: Enable detailed debug logging
 
@@ -77,8 +83,8 @@ def execute_seedvr2(
         temporal_overlap=0,
         prepend_frames=0,
         color_correction=color_correction,
-        input_noise_scale=0.0,
-        latent_noise_scale=0.0,
+        input_noise_scale=input_noise_scale,
+        latent_noise_scale=latent_noise_scale,
         offload_device=offload_device,
         enable_debug=enable_debug,
     )

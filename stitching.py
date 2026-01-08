@@ -79,6 +79,8 @@ def _batch_upscale_tiles(
     tile_upscale_resolution: int,
     progress=None,
     color_correction: str = "lab",
+    input_noise_scale: float = 0.0,
+    latent_noise_scale: float = 0.0,
     batch_size: int = 5,
     offload_device: str = "none",
     enable_debug: bool = False,
@@ -125,6 +127,8 @@ def _batch_upscale_tiles(
                 resolution=tile_upscale_resolution,
                 batch_size=safe_batch_size,  # Tell SeedVR2 the actual batch size
                 color_correction=color_correction,
+                input_noise_scale=input_noise_scale,
+                latent_noise_scale=latent_noise_scale,
                 offload_device=offload_device,
                 enable_debug=enable_debug,
             )
@@ -397,6 +401,8 @@ def process_and_stitch(
     anti_aliasing_strength: float = 0.0,
     blending_method: str = "auto",
     color_correction: str = "lab",
+    input_noise_scale: float = 0.0,
+    latent_noise_scale: float = 0.0,
     batch_size: int = 5,
     offload_device: str = "none",
     enable_debug: bool = False,
@@ -418,6 +424,8 @@ def process_and_stitch(
         anti_aliasing_strength: Anti-aliasing strength (0-1)
         blending_method: Blending method to use
         color_correction: Color correction method for SeedVR2
+        input_noise_scale: Input noise injection scale [0.0-1.0] for texture/grain preservation
+        latent_noise_scale: Latent space noise scale [0.0-1.0] for detail generation
         batch_size: Number of tiles to process together per batch
         offload_device: Device to offload intermediate tensors
         enable_debug: Enable detailed debug logging
@@ -449,6 +457,8 @@ def process_and_stitch(
         "progress": progress,
         "original_image": original_image,
         "color_correction": color_correction,
+        "input_noise_scale": input_noise_scale,
+        "latent_noise_scale": latent_noise_scale,
         "batch_size": batch_size,
         "offload_device": offload_device,
         "enable_debug": enable_debug,
@@ -519,6 +529,8 @@ def _process_and_stitch_multiband(
     progress,
     original_image: Image.Image,
     color_correction: str = "lab",
+    input_noise_scale: float = 0.0,
+    latent_noise_scale: float = 0.0,
     batch_size: int = 5,
     offload_device: str = "none",
     enable_debug: bool = False,
@@ -533,7 +545,7 @@ def _process_and_stitch_multiband(
     # Batch process and upscale tiles
     upscaled_tiles = _batch_upscale_tiles(
         tiles, dit_config, vae_config, seed, tile_upscale_resolution, progress, color_correction,
-        batch_size, offload_device, enable_debug
+        input_noise_scale, latent_noise_scale, batch_size, offload_device, enable_debug
     )
 
     # Build Laplacian pyramid for base image
@@ -627,6 +639,8 @@ def _process_and_stitch_bilateral(
     progress,
     original_image: Image.Image,
     color_correction: str = "lab",
+    input_noise_scale: float = 0.0,
+    latent_noise_scale: float = 0.0,
     batch_size: int = 5,
     offload_device: str = "none",
     enable_debug: bool = False,
@@ -645,7 +659,7 @@ def _process_and_stitch_bilateral(
     # Batch process and upscale tiles
     upscaled_tiles = _batch_upscale_tiles(
         tiles, dit_config, vae_config, seed, tile_upscale_resolution, progress, color_correction,
-        batch_size, offload_device, enable_debug
+        input_noise_scale, latent_noise_scale, batch_size, offload_device, enable_debug
     )
 
     # Process each tile
@@ -709,6 +723,8 @@ def _process_and_stitch_content_aware(
     progress,
     original_image: Image.Image,
     color_correction: str = "lab",
+    input_noise_scale: float = 0.0,
+    latent_noise_scale: float = 0.0,
     batch_size: int = 5,
     offload_device: str = "none",
     enable_debug: bool = False,
@@ -729,7 +745,7 @@ def _process_and_stitch_content_aware(
     # Batch process and upscale tiles
     upscaled_tiles = _batch_upscale_tiles(
         tiles, dit_config, vae_config, seed, tile_upscale_resolution, progress, color_correction,
-        batch_size, offload_device, enable_debug
+        input_noise_scale, latent_noise_scale, batch_size, offload_device, enable_debug
     )
 
     # Process each tile
@@ -799,6 +815,8 @@ def _process_and_stitch_zero_blur(
     progress,
     original_image: Image.Image,
     color_correction: str = "lab",
+    input_noise_scale: float = 0.0,
+    latent_noise_scale: float = 0.0,
     batch_size: int = 5,
     offload_device: str = "none",
     enable_debug: bool = False,
@@ -816,7 +834,7 @@ def _process_and_stitch_zero_blur(
     # Batch process and upscale tiles
     upscaled_tiles = _batch_upscale_tiles(
         tiles, dit_config, vae_config, seed, tile_upscale_resolution, progress, color_correction,
-        batch_size, offload_device, enable_debug
+        input_noise_scale, latent_noise_scale, batch_size, offload_device, enable_debug
     )
 
     # Process each upscaled tile for stitching
@@ -871,6 +889,8 @@ def _process_and_stitch_blended(
     progress,
     original_image: Image.Image,
     color_correction: str = "lab",
+    input_noise_scale: float = 0.0,
+    latent_noise_scale: float = 0.0,
     batch_size: int = 5,
     offload_device: str = "none",
     enable_debug: bool = False,
@@ -887,7 +907,7 @@ def _process_and_stitch_blended(
     # Batch process and upscale tiles
     upscaled_tiles = _batch_upscale_tiles(
         tiles, dit_config, vae_config, seed, tile_upscale_resolution, progress, color_correction,
-        batch_size, offload_device, enable_debug
+        input_noise_scale, latent_noise_scale, batch_size, offload_device, enable_debug
     )
 
     # Process each upscaled tile for stitching
